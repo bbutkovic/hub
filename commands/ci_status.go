@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 
 	"github.com/github/hub/git"
@@ -13,7 +14,7 @@ import (
 
 var cmdCiStatus = &Command{
 	Run:   ciStatus,
-	Usage: "ci-status [-v] [<COMMIT>]",
+	Usage: "ci-status [-v] [<COMMIT>|PR<PULLREQ-ID>]",
 	Long: `Display status of GitHub checks for a commit.
 
 ## Options:
@@ -39,6 +40,9 @@ var cmdCiStatus = &Command{
 
 	<COMMIT>
 		A commit SHA or branch name (default: "HEAD").
+		
+	<PULLREQ-ID>
+		A pull request ID (example: "PR1234").
 
 Possible outputs and exit statuses:
 
@@ -80,8 +84,10 @@ func checkSeverity(targetState string) int {
 
 func ciStatus(cmd *Command, args *Args) {
 	ref := "HEAD"
+	var err error
 	if !args.IsParamsEmpty() {
-		ref = args.RemoveParam(0)
+		ref, err = getRef(args.RemoveParam(0))
+		utils.Check(err)
 	}
 
 	localRepo, err := github.LocalRepo()
@@ -191,6 +197,32 @@ func ciVerboseFormat(statuses []github.CIStatus, formatString string, colorize b
 		}
 		ui.Print(ui.Expand(format, placeholders, colorize))
 	}
+}
+
+func getRef(arg string) (string, error) {
+	pullRequestRegex := regexp.MustCompile("^PR(\\d+)$")
+	if !pullRequestRegex.MatchString(arg) {
+		// not a pull request identifier
+		return arg, nil
+	}
+
+	pullRequestId := pullRequestRegex.FindStringSubmatch(arg)[1]
+	repo, err := github.LocalRepo()
+	if err != nil {
+		return "", err
+	}
+	project, err := repo.CurrentProject()
+	if err != nil {
+		return "", err
+	}
+
+	gh := github.NewClient(project.Host)
+	pullRequest, err := gh.PullRequest(project, pullRequestId)
+	if err != nil {
+		return "", err
+	}
+
+	return pullRequest.Head.Sha, nil
 }
 
 func stateRank(state string) uint32 {
