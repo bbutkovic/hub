@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -14,7 +15,7 @@ import (
 
 var cmdCiStatus = &Command{
 	Run:   ciStatus,
-	Usage: "ci-status [-v] [<COMMIT>|PR<PULLREQ-ID>]",
+	Usage: "ci-status [-v] [<COMMIT>|PR<PULLREQ-ID>|<PULLREQ-URL>]",
 	Long: `Display status of GitHub checks for a commit.
 
 ## Options:
@@ -43,6 +44,10 @@ var cmdCiStatus = &Command{
 		
 	<PULLREQ-ID>
 		A pull request ID (example: "PR1234").
+
+	<PULLREQ-URL>
+		Pull request URL, does not have to be the current repository.
+		Example: $ hub ci-status https://github.com/github/hub/pull/1234
 
 Possible outputs and exit statuses:
 
@@ -85,16 +90,27 @@ func checkSeverity(targetState string) int {
 func ciStatus(cmd *Command, args *Args) {
 	ref := "HEAD"
 	var err error
+	var project *github.Project
 	if !args.IsParamsEmpty() {
-		ref, err = getRef(args.RemoveParam(0))
+		arg := args.RemoveParam(0)
+
+		if prId := pullRequestId(arg); prId != "" {
+			ref, err = getRefByPullRequestId(prId)
+		} else if prUrl := pullRequestUrl(arg); prUrl != nil {
+			ref, project, err = getRefAndProjectByUrl(prUrl)
+		} else {
+			ref = arg
+		}
 		utils.Check(err)
 	}
 
-	localRepo, err := github.LocalRepo()
-	utils.Check(err)
+	if project == nil {
+		localRepo, err := github.LocalRepo()
+		utils.Check(err)
 
-	project, err := localRepo.MainProject()
-	utils.Check(err)
+		project, err = localRepo.MainProject()
+		utils.Check(err)
+	}
 
 	sha, err := git.Ref(ref)
 	if err != nil {
@@ -199,14 +215,16 @@ func ciVerboseFormat(statuses []github.CIStatus, formatString string, colorize b
 	}
 }
 
-func getRef(arg string) (string, error) {
-	pullRequestRegex := regexp.MustCompile("^PR(\\d+)$")
-	if !pullRequestRegex.MatchString(arg) {
+func pullRequestId(arg string) string {
+	pullRequestIdRegex := regexp.MustCompile("^PR(\\d+)$")
+	if !pullRequestIdRegex.MatchString(arg) {
 		// not a pull request identifier
-		return arg, nil
+		return ""
 	}
+	return pullRequestIdRegex.FindStringSubmatch(arg)[1]
+}
 
-	pullRequestId := pullRequestRegex.FindStringSubmatch(arg)[1]
+func getRefByPullRequestId(pullRequestId string) (string, error) {
 	repo, err := github.LocalRepo()
 	if err != nil {
 		return "", err
@@ -223,6 +241,31 @@ func getRef(arg string) (string, error) {
 	}
 
 	return pullRequest.Head.Sha, nil
+}
+
+func pullRequestUrl(arg string) *github.URL {
+	url, err := github.ParseURL(arg)
+	if err != nil {
+		return nil
+	}
+	return url
+}
+
+func getRefAndProjectByUrl(url *github.URL) (string, *github.Project, error) {
+	pullRequestRegex := regexp.MustCompile("^pull/(\\d+)")
+	projectPath := url.ProjectPath()
+	if !pullRequestRegex.MatchString(projectPath) {
+		return "", nil, errors.New("The URL does not contain a PR")
+	}
+
+	pullRequestId := pullRequestRegex.FindStringSubmatch(projectPath)[1]
+	gh := github.NewClient(url.Project.Host)
+	pullRequest, err := gh.PullRequest(url.Project, pullRequestId)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return pullRequest.Head.Sha, url.Project, nil
 }
 
 func stateRank(state string) uint32 {
